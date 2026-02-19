@@ -1,0 +1,151 @@
+name: Lighthouse CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+concurrency:
+  group: lighthouse-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+  VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+
+jobs:
+  lighthouse:
+    name: Lighthouse Performance Audit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: ".node-version"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate Prisma Client
+        run: npx prisma generate
+
+      - name: Build application
+        run: npm run build
+        env:
+          DATABASE_URL: "postgresql://dummy:dummy@localhost:5432/dummy"
+          NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: "pk_test_dummy"
+          CLERK_SECRET_KEY: "sk_test_dummy"
+          SKIP_DB_CONNECTION: "true"
+
+      - name: Start server
+        run: npm start &
+        env:
+          DATABASE_URL: "postgresql://dummy:dummy@localhost:5432/dummy"
+          NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: "pk_test_dummy"
+          CLERK_SECRET_KEY: "sk_test_dummy"
+          SKIP_DB_CONNECTION: "true"
+
+      - name: Wait for server to be ready
+        run: |
+          echo "Waiting for server..."
+          for i in $(seq 1 30); do
+            if curl -s -o /dev/null http://localhost:3000; then
+              echo "Server is ready!"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "Server failed to start within 60 seconds"
+          exit 1
+
+      - name: Run Lighthouse CI
+        uses: treosh/lighthouse-ci-action@v11
+        with:
+          urls: |
+            http://localhost:3000
+            http://localhost:3000/komik
+            http://localhost:3000/anime
+          uploadArtifacts: true
+          temporaryPublicStorage: true
+          configPath: ./lighthouserc.json
+
+      - name: Format Lighthouse Score
+        uses: actions/github-script@v7
+        if: github.event_name == 'pull_request'
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+
+            // Find the lighthouse results
+            const resultsPath = '.lighthouseci';
+            if (!fs.existsSync(resultsPath)) {
+              console.log('No Lighthouse results found');
+              return;
+            }
+
+            const files = fs.readdirSync(resultsPath).filter(f => f.endsWith('.json') && f.startsWith('lhr-'));
+            if (files.length === 0) {
+              console.log('No Lighthouse JSON files found');
+              return;
+            }
+
+            let comment = '## ⚡ Lighthouse Performance Report\n\n';
+            comment += '| URL | Performance | Accessibility | Best Practices | SEO |\n';
+            comment += '| --- | ----------- | ------------- | -------------- | --- |\n';
+
+            for (const file of files) {
+              try {
+                const result = JSON.parse(fs.readFileSync(path.join(resultsPath, file), 'utf8'));
+                const url = new URL(result.finalUrl).pathname || '/';
+                const perf = Math.round(result.categories.performance.score * 100);
+                const a11y = Math.round(result.categories.accessibility.score * 100);
+                const bp = Math.round(result.categories['best-practices'].score * 100);
+                const seo = Math.round(result.categories.seo.score * 100);
+
+                const getEmoji = (score) => {
+                  if (score >= 90) return '🟢';
+                  if (score >= 50) return '🟡';
+                  return '🔴';
+                };
+
+                comment += `| \`${url}\` | ${getEmoji(perf)} ${perf} | ${getEmoji(a11y)} ${a11y} | ${getEmoji(bp)} ${bp} | ${getEmoji(seo)} ${seo} |\n`;
+              } catch (e) {
+                console.log(`Error processing ${file}:`, e.message);
+              }
+            }
+
+            comment += '\n> 🟢 90-100 | 🟡 50-89 | 🔴 0-49\n';
+
+            // Post comment on PR
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+
+            const botComment = comments.find(c =>
+              c.user.type === 'Bot' && c.body.includes('Lighthouse Performance Report')
+            );
+
+            if (botComment) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: botComment.id,
+                body: comment
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: comment
+              });
+            }
+            
