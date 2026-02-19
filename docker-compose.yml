@@ -1,0 +1,89 @@
+# ================================
+# Docker Compose for KomikStream
+# Local development environment
+# ================================
+
+services:
+  # ==================== APPLICATION ====================
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runner
+    container_name: komikmanga-app
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - DATABASE_URL=${DATABASE_URL}
+      - NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=${NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY}
+      - CLERK_SECRET_KEY=${CLERK_SECRET_KEY}
+      - CLERK_WEBHOOK_SECRET=${CLERK_WEBHOOK_SECRET}
+      - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-https://api.sansekai.my.id/api}
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - komikmanga-network
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # ==================== DATABASE ====================
+  db:
+    image: postgres:16-alpine
+    container_name: komikmanga-db
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-komikmanga}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-komikmanga_secret}
+      - POSTGRES_DB=${POSTGRES_DB:-komikmanga}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - komikmanga-network
+    healthcheck:
+      test:
+        ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-komikmanga} -d ${POSTGRES_DB:-komikmanga}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ==================== DEV ONLY ====================
+  # Uncomment for local development with hot reload
+  # app-dev:
+  #   build:
+  #     context: .
+  #     dockerfile: Dockerfile.dev
+  #   container_name: komikmanga-dev
+  #   ports:
+  #     - "3000:3000"
+  #   volumes:
+  #     - .:/app
+  #     - /app/node_modules
+  #     - /app/.next
+  #   environment:
+  #     - NODE_ENV=development
+  #     - DATABASE_URL=postgresql://komikmanga:komikmanga_secret@db:5432/komikmanga
+  #   depends_on:
+  #     - db
+  #   networks:
+  #     - komikmanga-network
+
+# ==================== VOLUMES ====================
+volumes:
+  postgres_data:
+    driver: local
+
+# ==================== NETWORKS ====================
+networks:
+  komikmanga-network:
+    driver: bridge
+    
