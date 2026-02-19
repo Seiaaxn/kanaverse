@@ -1,0 +1,64 @@
+# ================================
+# Docker Compose for Development
+# Hot reload enabled
+# ================================
+
+services:
+  # ==================== DEV APPLICATION ====================
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    container_name: komikmanga-dev
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    volumes:
+      - .:/app
+      - /app/node_modules
+      - /app/.next
+    environment:
+      - NODE_ENV=development
+      - DATABASE_URL=postgresql://komikmanga:komikmanga_secret@db:5432/komikmanga
+      - NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=${NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY:-}
+      - CLERK_SECRET_KEY=${CLERK_SECRET_KEY:-}
+      - CLERK_WEBHOOK_SECRET=${CLERK_WEBHOOK_SECRET:-}
+      - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-https://api.sansekai.my.id/api}
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - komikmanga-network
+
+  # ==================== DATABASE ====================
+  db:
+    image: postgres:16-alpine
+    container_name: komikmanga-db-dev
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_USER=komikmanga
+      - POSTGRES_PASSWORD=komikmanga_secret
+      - POSTGRES_DB=komikmanga
+    volumes:
+      - postgres_dev_data:/var/lib/postgresql/data
+    networks:
+      - komikmanga-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U komikmanga -d komikmanga"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+# ==================== VOLUMES ====================
+volumes:
+  postgres_dev_data:
+    driver: local
+
+# ==================== NETWORKS ====================
+networks:
+  komikmanga-network:
+    driver: bridge
+    
