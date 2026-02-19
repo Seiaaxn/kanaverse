@@ -1,0 +1,260 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      release_type:
+        description: "Release type"
+        required: true
+        default: "patch"
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  # ==================== CHECK IF RELEASE NEEDED ====================
+  check-release:
+    name: Check Release
+    runs-on: ubuntu-latest
+    outputs:
+      should_release: ${{ steps.check.outputs.should_release }}
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check for release trigger
+        id: check
+        run: |
+          # Check if this is a manual trigger
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "should_release=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # Check commit messages for conventional commits
+          COMMIT_COUNT=$(git rev-list --count HEAD 2>/dev/null || echo "1")
+          if [ "$COMMIT_COUNT" -gt 5 ]; then
+            COMMITS=$(git log --format="%s" -n 5)
+          else
+            COMMITS=$(git log --format="%s" -n "$COMMIT_COUNT")
+          fi
+
+          # Look for feat:, fix:, BREAKING CHANGE:
+          if echo "$COMMITS" | grep -qE "^(feat|fix|perf|refactor)(\(.+\))?!?:"; then
+            echo "should_release=true" >> $GITHUB_OUTPUT
+          else
+            echo "should_release=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Determine version bump
+        id: version
+        if: steps.check.outputs.should_release == 'true'
+        run: |
+          # Get current version from package.json
+          CURRENT_VERSION=$(node -p "require('./package.json').version")
+          echo "Current version: $CURRENT_VERSION"
+
+          # Parse version
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT_VERSION"
+
+          # Determine bump type
+          BUMP_TYPE="${{ github.event.inputs.release_type }}"
+
+          if [ -z "$BUMP_TYPE" ]; then
+            # Auto-detect from commits
+            COMMIT_COUNT=$(git rev-list --count HEAD 2>/dev/null || echo "1")
+            if [ "$COMMIT_COUNT" -gt 5 ]; then
+              COMMITS=$(git log --format="%s" -n 5)
+            else
+              COMMITS=$(git log --format="%s" -n "$COMMIT_COUNT")
+            fi
+
+            if echo "$COMMITS" | grep -qE "BREAKING CHANGE:|^[a-z]+(\(.+\))?!:"; then
+              BUMP_TYPE="major"
+            elif echo "$COMMITS" | grep -qE "^feat(\(.+\))?:"; then
+              BUMP_TYPE="minor"
+            else
+              BUMP_TYPE="patch"
+            fi
+          fi
+
+          # Calculate new version
+          case $BUMP_TYPE in
+            major)
+              NEW_VERSION="$((MAJOR + 1)).0.0"
+              ;;
+            minor)
+              NEW_VERSION="${MAJOR}.$((MINOR + 1)).0"
+              ;;
+            patch)
+              NEW_VERSION="${MAJOR}.${MINOR}.$((PATCH + 1))"
+              ;;
+          esac
+
+          echo "New version: $NEW_VERSION (${BUMP_TYPE})"
+          echo "version=$NEW_VERSION" >> $GITHUB_OUTPUT
+          echo "bump_type=$BUMP_TYPE" >> $GITHUB_OUTPUT
+
+  # ==================== CREATE RELEASE ====================
+  release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    needs: [check-release]
+    if: needs.check-release.outputs.should_release == 'true'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: ".node-version"
+          cache: "npm"
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Update package.json version
+        env:
+          RELEASE_VERSION: ${{ needs.check-release.outputs.version }}
+        run: |
+          npm version "${RELEASE_VERSION}" --no-git-tag-version
+
+      - name: Generate Changelog
+        id: changelog
+        env:
+          RELEASE_VERSION: ${{ needs.check-release.outputs.version }}
+        run: |
+          VERSION="${RELEASE_VERSION}"
+          DATE=$(date +%Y-%m-%d)
+
+          # Get commits since last tag
+          LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+
+          if [ -z "$LAST_TAG" ]; then
+            # No tags yet, get all commits (up to 50)
+            COMMIT_COUNT=$(git rev-list --count HEAD 2>/dev/null || echo "1")
+            if [ "$COMMIT_COUNT" -gt 50 ]; then
+              COMMIT_COUNT=50
+            fi
+            COMMITS=$(git log --format="- %s (%h)" -n "$COMMIT_COUNT" 2>/dev/null || echo "- Initial release")
+          else
+            COMMITS=$(git log --format="- %s (%h)" ${LAST_TAG}..HEAD)
+          fi
+
+          # Categorize commits
+          FEATURES=$(echo "$COMMITS" | grep -E "^- feat" || true)
+          FIXES=$(echo "$COMMITS" | grep -E "^- fix" || true)
+          OTHERS=$(echo "$COMMITS" | grep -vE "^- (feat|fix)" || true)
+
+          # Build changelog
+          CHANGELOG="## [${VERSION}] - ${DATE}\n\n"
+
+          if [ -n "$FEATURES" ]; then
+            CHANGELOG="${CHANGELOG}### ✨ Features\n${FEATURES}\n\n"
+          fi
+
+          if [ -n "$FIXES" ]; then
+            CHANGELOG="${CHANGELOG}### 🐛 Bug Fixes\n${FIXES}\n\n"
+          fi
+
+          if [ -n "$OTHERS" ]; then
+            CHANGELOG="${CHANGELOG}### 📦 Other Changes\n${OTHERS}\n\n"
+          fi
+
+          echo "changelog<<EOF" >> $GITHUB_OUTPUT
+          echo -e "$CHANGELOG" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Update CHANGELOG.md
+        env:
+          RELEASE_VERSION: ${{ needs.check-release.outputs.version }}
+          CHANGELOG_CONTENT: ${{ steps.changelog.outputs.changelog }}
+        run: |
+          VERSION="${RELEASE_VERSION}"
+          DATE=$(date +%Y-%m-%d)
+
+          # Create CHANGELOG if not exists
+          if [ ! -f CHANGELOG.md ]; then
+            echo "# Changelog" > CHANGELOG.md
+            echo "" >> CHANGELOG.md
+            echo "All notable changes to this project will be documented in this file." >> CHANGELOG.md
+            echo "" >> CHANGELOG.md
+          fi
+
+          # Prepend new changelog entry
+          TEMP_FILE=$(mktemp)
+          echo "${CHANGELOG_CONTENT}" > "$TEMP_FILE"
+          echo "" >> "$TEMP_FILE"
+
+          # Insert after header
+          head -n 4 CHANGELOG.md > CHANGELOG.new.md
+          cat "$TEMP_FILE" >> CHANGELOG.new.md
+          tail -n +5 CHANGELOG.md >> CHANGELOG.new.md
+          mv CHANGELOG.new.md CHANGELOG.md
+
+      - name: Commit changes
+        env:
+          RELEASE_VERSION: ${{ needs.check-release.outputs.version }}
+        run: |
+          git add package.json package-lock.json CHANGELOG.md
+          git commit -m "chore(release): v${RELEASE_VERSION} [skip ci]"
+
+      - name: Create and push tag
+        env:
+          RELEASE_VERSION: ${{ needs.check-release.outputs.version }}
+        run: |
+          git tag -a "v${RELEASE_VERSION}" -m "Release v${RELEASE_VERSION}"
+          git push origin main --follow-tags
+
+      - name: Create GitHub Release
+        uses: actions/github-script@v7
+        env:
+          RELEASE_VERSION: ${{ needs.check-release.outputs.version }}
+          CHANGELOG: ${{ steps.changelog.outputs.changelog }}
+        with:
+          script: |
+            const version = process.env.RELEASE_VERSION;
+            const changelog = process.env.CHANGELOG;
+            const { data: release } = await github.rest.repos.createRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag_name: `v${version}`,
+              name: `🚀 Release v${version}`,
+              body: changelog,
+              draft: false,
+              prerelease: false,
+            });
+
+            console.log(`Created release: ${release.html_url}`);
+
+      - name: Release Summary
+        env:
+          RELEASE_VERSION: ${{ needs.check-release.outputs.version }}
+          CHANGELOG: ${{ steps.changelog.outputs.changelog }}
+        run: |
+          echo "## 🚀 Release v${RELEASE_VERSION}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "${CHANGELOG}" >> $GITHUB_STEP_SUMMARY
+          
