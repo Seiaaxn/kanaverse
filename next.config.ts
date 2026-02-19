@@ -8,7 +8,7 @@ const requiredEnvVars = [
 ] as const;
 
 // Only validate in production builds (not during CI/testing)
-if (process.env.NODE_ENV === "production" && !process.env.CI) {
+if (process.env.NODE_ENV === "production" && !process.env.CI && !process.env.VERCEL) {
   for (const envVar of requiredEnvVars) {
     if (!process.env[envVar]) {
       console.warn(
@@ -31,9 +31,6 @@ const securityHeaders = [
 ];
 
 const nextConfig: NextConfig = {
-  // Standalone output for Docker deployment
-  output: "standalone",
-
   // Remove X-Powered-By header (information disclosure)
   poweredByHeader: false,
 
@@ -77,4 +74,4 @@ const nextConfig: NextConfig = {
 };
 
 export default nextConfig;
-    
+
